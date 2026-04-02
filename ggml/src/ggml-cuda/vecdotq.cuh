@@ -188,6 +188,9 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_1_q8_1_imp
 #define VDR_Q8_0_Q8_1_MMVQ 2
 #define VDR_Q8_0_Q8_1_MMQ 8
 
+#define VDR_Q1_0_Q8_1_MMQ    1
+#define VDR_Q1_0_g128_Q8_1_MMQ 4
+
 template <typename T, int vdr> static __device__ __forceinline__ T vec_dot_q8_0_q8_1_impl(
     const int * v, const int * u, const T & d8_0, const T & d8_1) {
 

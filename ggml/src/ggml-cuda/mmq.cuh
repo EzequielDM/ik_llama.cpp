@@ -106,6 +106,8 @@ static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
         case GGML_TYPE_IQ2_KT:
         case GGML_TYPE_IQ3_KT:
         case GGML_TYPE_IQ4_KT:
+        case GGML_TYPE_Q1_0:
+        case GGML_TYPE_Q1_0_g128:
             return MMQ_Q8_1_DS_LAYOUT_D4;
         default:
             fprintf(stderr, "Unhandled type %s (%d)\n", ggml_type_name(type_x), type_x);
@@ -228,6 +230,9 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
         case GGML_TYPE_IQ2_KT  : return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_IQ3_KT  : return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_IQ4_KT  : return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_Q1_0:
+        case GGML_TYPE_Q1_0_g128:
+            return tile_x_sizes{0, 0, 0}; // DP4A disabled for Q1_0
         default                : return tile_x_sizes{0, 0, 0};
     }
 }
@@ -288,6 +293,9 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_IQ2_KT  : return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_IQ3_KT  : return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_IQ4_KT  : return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q1_0:
+        case GGML_TYPE_Q1_0_g128:
+            return MMQ_MMA_TILE_X_K_Q8_0;
         default                : return 0;
     }
 }
@@ -3593,6 +3601,154 @@ static __device__ __forceinline__ void mmq_write_back_mma(
     }
 }
 
+// Q1_0 MMQ load tiles (MMA-only, adapted from PrismML)
+template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinline__ void load_tiles_q1_0(
+    const char * __restrict__ x, int * __restrict__ x_tile, const int & kbx0, const int & i_max, const int & stride) {
+
+#ifndef INT8_MMA_AVAILABLE
+    GGML_UNUSED(x, x_tile, kbx0, i_max, stride);
+    NO_DEVICE_CODE;
+#else
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + 2*WARP_SIZE);
+
+    constexpr int blocks_per_iter = MMQ_ITER_K / QK1_0;
+    constexpr int threads_per_row = blocks_per_iter * QI1_0;
+    constexpr int nrows = WARP_SIZE / threads_per_row;
+    constexpr int scale_entries_per_row = blocks_per_iter * (QK1_0 / QK8_1);
+
+    const int txi = threadIdx.x % threads_per_row;
+    const int kbx = txi / QI1_0;
+
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
+        int i = i0 + threadIdx.y*nrows + threadIdx.x/threads_per_row;
+
+        if (need_check) {
+            i = min(i, i_max);
+        }
+
+        const block_q1_0 * bxi = (const block_q1_0 *) x + kbx0 + i*stride + kbx;
+
+        // Read all 4 bytes safely to avoid alignment issues
+        const int qs0 = bxi->qs[0] | (bxi->qs[1] << 8) | (bxi->qs[2] << 16) | (bxi->qs[3] << 24);
+
+        // For MMA: unpack 1-bit values to signed bytes (-1 or +1)
+        int unpacked_bytes[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int shift = j * 4;
+            const int bits4 = (qs0 >> shift) & 0x0F;
+            const int b0 = (bits4 & 0x01) ? 1 : -1;
+            const int b1 = (bits4 & 0x02) ? 1 : -1;
+            const int b2 = (bits4 & 0x04) ? 1 : -1;
+            const int b3 = (bits4 & 0x08) ? 1 : -1;
+            unpacked_bytes[j] = (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24);
+        }
+
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + kbx*QI8_0 + j] = unpacked_bytes[j];
+        }
+    }
+
+    constexpr int rows_per_warp = WARP_SIZE / scale_entries_per_row;
+    const int kbxd = threadIdx.x % scale_entries_per_row;
+
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps * rows_per_warp) {
+        int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / scale_entries_per_row;
+
+        if (need_check) {
+            i = min(i, i_max);
+        }
+
+        const block_q1_0 * bxi = (const block_q1_0 *) x + kbx0 + i*stride + kbxd;
+
+        x_df[i*MMQ_MMA_TILE_X_K_Q8_0 + kbxd] = bxi->d;
+    }
+#endif // INT8_MMA_AVAILABLE
+}
+
+// Q1_0_g128 MMQ load tiles (MMA-only, adapted from PrismML)
+template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinline__ void load_tiles_q1_0_g128(
+    const char * __restrict__ x, int * __restrict__ x_tile, const int & kbx0, const int & i_max, const int & stride) {
+
+#ifndef INT8_MMA_AVAILABLE
+    GGML_UNUSED(x, x_tile, kbx0, i_max, stride);
+    NO_DEVICE_CODE;
+#else
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + 2*WARP_SIZE);
+
+    constexpr int blocks_per_iter = MMQ_ITER_K / QK1_0_g128;
+    constexpr int threads_per_row = blocks_per_iter * QI1_0_g128;
+    constexpr int nrows = WARP_SIZE / threads_per_row;
+    constexpr int scale_entries_per_block = QK1_0_g128 / QK8_1;
+    constexpr int scale_entries_per_row = blocks_per_iter * scale_entries_per_block;
+
+    const int txi  = threadIdx.x % threads_per_row;
+    const int kbx  = txi / QI1_0_g128;
+    const int kqsx = txi % QI1_0_g128;
+
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
+        int i = i0 + threadIdx.y*nrows + threadIdx.x/threads_per_row;
+
+        if (need_check) {
+            i = min(i, i_max);
+        }
+
+        const block_q1_0_g128 * bxi = (const block_q1_0_g128 *) x + kbx0 + i*stride + kbx;
+        const int qs_offset = 4*kqsx;
+        const int qs0 = bxi->qs[qs_offset + 0] | (bxi->qs[qs_offset + 1] << 8) |
+                        (bxi->qs[qs_offset + 2] << 16) | (bxi->qs[qs_offset + 3] << 24);
+
+        int unpacked_bytes[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int shift = j * 4;
+            const int bits4 = (qs0 >> shift) & 0x0F;
+            const int b0 = (bits4 & 0x01) ? 1 : -1;
+            const int b1 = (bits4 & 0x02) ? 1 : -1;
+            const int b2 = (bits4 & 0x04) ? 1 : -1;
+            const int b3 = (bits4 & 0x08) ? 1 : -1;
+            unpacked_bytes[j] = (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24);
+        }
+
+        const int dst_offset = kbx*(scale_entries_per_block*QI8_0) + kqsx*QI8_0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + dst_offset + j] = unpacked_bytes[j];
+        }
+    }
+
+    const int ksx = threadIdx.x % scale_entries_per_row;
+    const int scale_block = ksx / scale_entries_per_block;
+
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps) {
+        int i = i0 + threadIdx.y;
+
+        if (need_check) {
+            i = min(i, i_max);
+        }
+
+        const block_q1_0_g128 * bxi = (const block_q1_0_g128 *) x + kbx0 + i*stride + scale_block;
+
+        x_df[i*MMQ_MMA_TILE_X_K_Q8_0 + ksx] = bxi->d;
+    }
+#endif // INT8_MMA_AVAILABLE
+}
+
+// DP4A stub for Q1_0 types (disabled, MMA-only)
+template <int mmq_x, int mmq_y, int nwarps>
+static __device__ __forceinline__ void vec_dot_q1_mmq_dp4a_disabled(
+    const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int & k00) {
+    GGML_UNUSED_VARS(x, y, sum, k00, mmq_x, mmq_y, nwarps);
+    NO_DEVICE_CODE;
+}
+
 // -------------------------------------------------------------------------------------------------------------------------------------
 
 template <int mmq_x, int mmq_y, int nwarps, bool need_check, ggml_type type>
@@ -3841,6 +3997,20 @@ struct mmq_type_traits<mmq_x, mmq_y, nwarps, need_check, GGML_TYPE_IQ5_KS_R4> {
     static constexpr load_tiles_mmq_t load_tiles   = load_tiles_iq5_ks_r4<mmq_y, nwarps, need_check>;
     static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, nwarps, MMQ_Q8_1_DS_LAYOUT_D4>;
     static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y, nwarps>;
+};
+
+template <int mmq_x, int mmq_y, int nwarps, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, nwarps, need_check, GGML_TYPE_Q1_0> {
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q1_0<mmq_y, nwarps, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, nwarps, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q1_mmq_dp4a_disabled<mmq_x, mmq_y, nwarps>;
+};
+
+template <int mmq_x, int mmq_y, int nwarps, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, nwarps, need_check, GGML_TYPE_Q1_0_g128> {
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q1_0_g128<mmq_y, nwarps, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, nwarps, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q1_mmq_dp4a_disabled<mmq_x, mmq_y, nwarps>;
 };
 
 template <ggml_type type, int mmq_x, int nwarps, bool need_check, bool fixup>
@@ -4302,6 +4472,8 @@ extern DECL_MMQ_CASE(GGML_TYPE_IQ1_KT);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ2_KT);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ3_KT);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ4_KT);
+extern DECL_MMQ_CASE(GGML_TYPE_Q1_0);
+extern DECL_MMQ_CASE(GGML_TYPE_Q1_0_g128);
 
 // -------------------------------------------------------------------------------------------------------------------------
 
