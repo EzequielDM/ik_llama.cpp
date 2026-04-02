@@ -1546,6 +1546,8 @@ class GGMLQuantizationType(IntEnum):
     IQ5_KS_R4 = 352
     Q8_KV_R8  = 398
     Q8_K_R8   = 399
+    Q1_0      = 400
+    Q1_0_G128 = 401
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -1643,6 +1645,8 @@ class LlamaFileType(IntEnum):
     MOSTLY_IQ5_KS_R4     = 350 #except 1d tensors
     MOSTLY_Q8_KV_R8      = 398 #except 1d tensors
     MOSTLY_Q8_K_R8       = 399 #except 1d tensors
+    MOSTLY_Q1_0          = 400 #except 1d tensors
+    MOSTLY_Q1_0_G128     = 401 #except 1d tensors
 
     GUESSED              = 1024  # not specified in the model file
 
@@ -1778,6 +1782,8 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.IQ5_KS_R4   : ( 256,  168),
     GGMLQuantizationType.Q8_KV_R8    : (  32,   32),
     GGMLQuantizationType.Q8_K_R8     : ( 256,  258),
+    GGMLQuantizationType.Q1_0        : (  32,    6),
+    GGMLQuantizationType.Q1_0_G128   : ( 128,   18),
 }
 
 
