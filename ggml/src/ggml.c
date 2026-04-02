@@ -28926,6 +28926,13 @@ struct gguf_context * gguf_init_from_file(const char * fname, struct gguf_init_p
             ok = ok && gguf_fread_el (file, &info->type,   sizeof(info->type),    &offset);
             ok = ok && gguf_fread_el (file, &info->offset, sizeof(info->offset),  &offset);
 
+            // Remap PrismML type IDs to ik_llama.cpp type IDs
+            if (info->type == (enum ggml_type)40) {
+                info->type = GGML_TYPE_Q1_0;
+            } else if (info->type == (enum ggml_type)41) {
+                info->type = GGML_TYPE_Q1_0_g128;
+            }
+
             // TODO: return an error instead of crashing with GGML_ASSERT
             gguf_tensor_info_sanitize(info);
 
