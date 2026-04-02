@@ -17580,7 +17580,35 @@ static void ggml_compute_forward_mul_mat_up_gate(
                          vec_dot_type, (const char *)wdata, row_size,
                          NULL, NULL,
                          (float *)dst->data, nb1, nb2,
-                         NULL, limit, ith, nth)) GGML_ABORT("fatal error");
+                         NULL, limit, ith, nth)) {
+        // Fallback for types not supported by iqk (e.g., Q1_0, Q1_0_g128)
+        ggml_vec_dot_t const vec_dot = type_traits[type].vec_dot;
+        const int unary_op = dst->op_params[0];
+
+        for (int64_t i11 = ith; i11 < ne11; i11 += nth) {
+            const char * src1_col = (const char *)wdata + i11 * row_size;
+            for (int64_t i01 = 0; i01 < ne01; ++i01) {
+                const char * src0_1_row = (const char *)src0_1->data + i01 * nb01;
+                const char * src0_2_row = (const char *)src0_2->data + i01 * nb01;
+
+                float up_val, gate_val;
+                vec_dot(ne00, &up_val, 0, src0_1_row, 0, src1_col, 0, 1);
+                vec_dot(ne00, &gate_val, 0, src0_2_row, 0, src1_col, 0, 1);
+
+                // Apply activation to gate, then multiply by up
+                float act_gate = (unary_op == GGML_UNARY_OP_SILU)
+                    ? gate_val / (1.0f + expf(-gate_val))   // SiLU(x) = x * sigmoid(x)
+                    : 1.0f / (1.0f + expf(-gate_val));      // Sigmoid(x)
+                float result = up_val * act_gate;
+
+                if (limit > 1e-6f) {
+                    result = MAX(-limit, MIN(limit, result));
+                }
+
+                ((float *)((char *)dst->data + i01 * nb0 + i11 * nb1))[0] = result;
+            }
+        }
+    }
 
 }
 #endif
