@@ -4663,6 +4663,71 @@ void ggml_vec_dot_q4_0_q8_0(int n, float * restrict s, size_t bs, const void * r
     *s = sumf;
 }
 
+void ggml_vec_dot_q1_0_q8_0(int n, float * restrict s, size_t bs, const void * restrict vx, size_t bx, const void * restrict vy, size_t by, int nrc) {
+    const int qk = QK1_0;
+    const int nb = n / qk;
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q1_0 * restrict x = vx;
+    const block_q8_0 * restrict y = vy;
+
+    float sumf = 0.0;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const float d = GGML_FP16_TO_FP32(x[ib].d) * GGML_FP16_TO_FP32(y[ib].d);
+        int sumi = 0;
+        for (int j = 0; j < qk; ++j) {
+            const int byte_index = j / 8;
+            const int bit_offset = j % 8;
+            const int sign = (x[ib].qs[byte_index] >> bit_offset) & 1;
+            const int qv = sign ? 1 : -1;
+            sumi += qv * y[ib].qs[j];
+        }
+        sumf += sumi * d;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_q1_0_g128_q8_0(int n, float * restrict s, size_t bs, const void * restrict vx, size_t bx, const void * restrict vy, size_t by, int nrc) {
+    const int qk = QK1_0_g128;
+    const int nb = n / qk;
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q1_0_g128 * restrict x = vx;
+    const block_q8_0 * restrict y = vy;
+
+    float sumf = 0.0;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const float d_x = GGML_FP16_TO_FP32(x[ib].d);
+        int sumi = 0;
+        for (int j = 0; j < qk; ++j) {
+            const int byte_index = j / 8;
+            const int bit_offset = j % 8;
+            const int sign = (x[ib].qs[byte_index] >> bit_offset) & 1;
+            const int qv = sign ? 1 : -1;
+            const int q8_sub = j / QK8_0;
+            const int q8_off = j % QK8_0;
+            const float d_y = GGML_FP16_TO_FP32(y[ib * (qk/QK8_0) + q8_sub].d);
+            sumi += qv * y[ib * (qk/QK8_0) + q8_sub].qs[q8_off] * d_x * d_y;
+        }
+        sumf += sumi;
+    }
+
+    *s = sumf;
+}
+
 void ggml_vec_dot_q4_1_q8_1(int n, float * restrict s, size_t bs, const void * restrict vx, size_t bx, const void * restrict vy, size_t by, int nrc) {
 #if GGML_USE_IQK_MULMAT
     if (iqk_mul_mat(nrc, nrc, n, GGML_TYPE_Q4_1, vx, bx, GGML_TYPE_Q8_1, vy, by, s, bs, 0, 1)) {
