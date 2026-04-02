@@ -3606,7 +3606,7 @@ template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinlin
     const char * __restrict__ x, int * __restrict__ x_tile, const int & kbx0, const int & i_max, const int & stride) {
 
 #ifndef INT8_MMA_AVAILABLE
-    GGML_UNUSED(x, x_tile, kbx0, i_max, stride);
+    GGML_UNUSED(x_tile); GGML_UNUSED(kbx0); GGML_UNUSED(i_max); GGML_UNUSED(stride);
     NO_DEVICE_CODE;
 #else
     int   * x_qs = (int   *)  x_tile;
@@ -3675,7 +3675,7 @@ template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinlin
     const char * __restrict__ x, int * __restrict__ x_tile, const int & kbx0, const int & i_max, const int & stride) {
 
 #ifndef INT8_MMA_AVAILABLE
-    GGML_UNUSED(x, x_tile, kbx0, i_max, stride);
+    GGML_UNUSED(x_tile); GGML_UNUSED(kbx0); GGML_UNUSED(i_max); GGML_UNUSED(stride);
     NO_DEVICE_CODE;
 #else
     int   * x_qs = (int   *)  x_tile;
